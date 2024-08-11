@@ -4,6 +4,7 @@ import os
 import sys
 import time
 
+from pathlib import Path
 import numpy as np
 import torch
 import transformers
@@ -95,11 +96,10 @@ if __name__ == '__main__':
         name += '_' + str(accelerator.process_index)
 
         if args.log_all:
-            group = args.name if args.name else 'DDP_' + local_time
-            run = wandb.init(entity=args.entity, project=args.project, group=group, config=config, name=name)
+            run = wandb.init(entity=args.entity, project=args.project, config=config, name=name, group=args.dataset)
         else:
             if accelerator.is_local_main_process:
-                run = wandb.init(entity=args.entity, project=args.project, config=config, name=name)
+                run = wandb.init(entity=args.entity, project=args.project, config=config, name=name, group=args.dataset)
             else:
                 run = None
     else:
@@ -116,7 +116,7 @@ if __name__ == '__main__':
 
     kg = DBpedia(dataset=args.dataset, debug=args.debug).get_entity_kg_info()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, truncation=True, max_length=512)
     tokenizer.add_special_tokens(gpt2_special_tokens_dict)
     model = PromptGPT2forCRS.from_pretrained(args.model)
     model.resize_token_embeddings(len(tokenizer))
@@ -134,6 +134,7 @@ if __name__ == '__main__':
         n_entity=kg['num_entities'], num_relations=kg['num_relations'], num_bases=args.num_bases,
         edge_index=kg['edge_index'], edge_type=kg['edge_type'],
     ).to(device)
+
 
     fix_modules = [model, text_encoder]
     for module in fix_modules:
@@ -197,6 +198,13 @@ if __name__ == '__main__':
     prompt_encoder, optimizer, train_dataloader, valid_dataloader, test_dataloader = accelerator.prepare(
         prompt_encoder, optimizer, train_dataloader, valid_dataloader, test_dataloader
     )
+
+    # logger.info(f"type of prompt_encoder: {type(prompt_encoder)}")
+    # logger.info(f"type of optimizer: {type(optimizer)}")
+    # logger.info(f"type of train_dataloader: {type(train_dataloader)}")
+    # logger.info(f"type of valid_dataloader: {type(valid_dataloader)}")
+    # logger.info(f"type of test_dataloader: {type(test_dataloader)}")
+
     # step, epoch, batch size
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is None:
@@ -243,7 +251,8 @@ if __name__ == '__main__':
                 output_entity=True
             )
             batch['context']['prompt_embeds'] = prompt_embeds
-            batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+            # batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+            batch['context']['entity_embeds'] = accelerator.unwrap_model(prompt_encoder).get_entity_embeds()
 
             loss = model(**batch['context'], rec=True).rec_loss / args.gradient_accumulation_steps
             accelerator.backward(loss)
@@ -274,7 +283,7 @@ if __name__ == '__main__':
         # valid
         valid_loss = []
         prompt_encoder.eval()
-        for batch in tqdm(valid_dataloader):
+        for batch in tqdm(valid_dataloader, desc='validating..'):
             with torch.no_grad():
                 token_embeds = text_encoder(**batch['prompt']).last_hidden_state
                 prompt_embeds = prompt_encoder(
@@ -283,7 +292,8 @@ if __name__ == '__main__':
                     output_entity=True
                 )
                 batch['context']['prompt_embeds'] = prompt_embeds
-                batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+                # batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+                batch['context']['entity_embeds'] = accelerator.unwrap_model(prompt_encoder).get_entity_embeds()
 
                 outputs = model(**batch['context'], rec=True)
                 valid_loss.append(float(outputs.rec_loss))
@@ -293,7 +303,12 @@ if __name__ == '__main__':
                 evaluator.evaluate(ranks, labels)
 
         # metric
-        report = accelerator.gather(evaluator.report())
+        # error
+        # from IPython import embed; embed()
+        report = evaluator.report()
+        for k, v in report.items():
+            report[k] = v.to(device)
+        report = accelerator.gather(report)
         for k, v in report.items():
             report[k] = v.sum().item()
 
@@ -309,14 +324,14 @@ if __name__ == '__main__':
         evaluator.reset_metric()
 
         if valid_report[f'valid/{metric}'] * mode > best_metric * mode:
-            prompt_encoder.save(best_metric_dir)
+            accelerator.unwrap_model(prompt_encoder).save(best_metric_dir)
             best_metric = valid_report[f'valid/{metric}']
             logger.info(f'new best model with {metric}')
 
         # test
         test_loss = []
         prompt_encoder.eval()
-        for batch in tqdm(test_dataloader):
+        for batch in tqdm(test_dataloader, desc='testing..'):
             with torch.no_grad():
                 token_embeds = text_encoder(**batch['prompt']).last_hidden_state
                 prompt_embeds = prompt_encoder(
@@ -325,7 +340,7 @@ if __name__ == '__main__':
                     output_entity=True
                 )
                 batch['context']['prompt_embeds'] = prompt_embeds
-                batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+                batch['context']['entity_embeds'] = accelerator.unwrap_model(prompt_encoder).get_entity_embeds()
 
                 outputs = model(**batch['context'], rec=True)
                 test_loss.append(float(outputs.rec_loss))
@@ -335,7 +350,10 @@ if __name__ == '__main__':
                 evaluator.evaluate(ranks, labels)
 
         # metric
-        report = accelerator.gather(evaluator.report())
+        report = evaluator.report()
+        for k, v in report.items():
+            report[k] = v.to(device)
+        report = accelerator.gather(report)
         for k, v in report.items():
             report[k] = v.sum().item()
 
@@ -357,5 +375,5 @@ if __name__ == '__main__':
 
     final_dir = os.path.join(args.output_dir, 'final')
     os.makedirs(final_dir, exist_ok=True)
-    prompt_encoder.save(final_dir)
+    accelerator.unwrap_model(prompt_encoder).save(final_dir)
     logger.info(f'save final model')

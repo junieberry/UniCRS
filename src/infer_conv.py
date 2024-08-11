@@ -116,7 +116,7 @@ if __name__ == '__main__':
 
     kg = DBpedia(dataset=args.dataset, debug=args.debug).get_entity_kg_info()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, truncation=True, max_length=512)
     tokenizer.add_special_tokens(gpt2_special_tokens_dict)
     model = PromptGPT2forCRS.from_pretrained(args.model)
     model.resize_token_embeddings(len(tokenizer))
@@ -128,6 +128,7 @@ if __name__ == '__main__':
     text_encoder = AutoModel.from_pretrained(args.text_encoder)
     text_encoder.resize_token_embeddings(len(text_tokenizer))
     text_encoder = text_encoder.to(device)
+
 
     prompt_encoder = KGPrompt(
         model.config.n_embd, text_encoder.config.hidden_size, model.config.n_head, model.config.n_layer, 2,
@@ -166,6 +167,7 @@ if __name__ == '__main__':
     gen_file_path = os.path.join(gen_dir, f'{model_name}_{args.split}.jsonl')
     evaluator = ConvEvaluator(tokenizer=tokenizer, log_file_path=gen_file_path)
 
+    logger.info("Interence Started")   
     for batch in tqdm(dataloader, disable=not accelerator.is_local_main_process):
         with torch.no_grad():
             token_embeds = text_encoder(**batch['prompt']).last_hidden_state

@@ -228,7 +228,7 @@ if __name__ == '__main__':
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process, desc="Training..")
 
     # save model with best metric
     metric, mode = 'loss', -1
@@ -242,6 +242,8 @@ if __name__ == '__main__':
 
     # train loop
     for epoch in range(args.num_train_epochs):
+        # print(f'Epoch {epoch}')
+        logger.info(f'Epoch {epoch}')
         train_loss = []
         prompt_encoder.train()
         for step, batch in enumerate(train_dataloader):
@@ -254,7 +256,8 @@ if __name__ == '__main__':
                 use_rec_prefix=True
             )
             batch['context']['prompt_embeds'] = prompt_embeds
-            batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+            # batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+            batch['context']['entity_embeds'] = accelerator.unwrap_model(prompt_encoder).get_entity_embeds()
 
             loss = model(**batch['context'], rec=True).rec_loss / args.gradient_accumulation_steps
             accelerator.backward(loss)
@@ -285,7 +288,7 @@ if __name__ == '__main__':
         # valid
         valid_loss = []
         prompt_encoder.eval()
-        for batch in tqdm(valid_dataloader):
+        for batch in tqdm(valid_dataloader, desc="Validating.."):
             with torch.no_grad():
                 token_embeds = text_encoder(**batch['prompt']).last_hidden_state
                 prompt_embeds = prompt_encoder(
@@ -295,7 +298,8 @@ if __name__ == '__main__':
                     use_rec_prefix=True
                 )
                 batch['context']['prompt_embeds'] = prompt_embeds
-                batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+                # batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+                batch['context']['entity_embeds'] = accelerator.unwrap_model(prompt_encoder).get_entity_embeds()
 
                 outputs = model(**batch['context'], rec=True)
                 valid_loss.append(float(outputs.rec_loss))
@@ -306,7 +310,10 @@ if __name__ == '__main__':
                 evaluator.evaluate(ranks, labels)
 
         # metric
-        report = accelerator.gather(evaluator.report())
+        report = evaluator.report()
+        for k, v in report.items():
+            report[k] = v.to(device)
+        report = accelerator.gather(report)
         for k, v in report.items():
             report[k] = v.sum().item()
 
@@ -322,14 +329,15 @@ if __name__ == '__main__':
         evaluator.reset_metric()
 
         if valid_report[f'valid/{metric}'] * mode > best_metric * mode:
-            prompt_encoder.save(best_metric_dir)
+            # prompt_encoder.save(best_metric_dir)
+            accelerator.unwrap_model(prompt_encoder).save(best_metric_dir)
             best_metric = valid_report[f'valid/{metric}']
             logger.info(f'new best model with {metric}')
 
         # test
         test_loss = []
         prompt_encoder.eval()
-        for batch in tqdm(test_dataloader):
+        for batch in tqdm(test_dataloader, desc='Testing..'):
             with torch.no_grad():
                 token_embeds = text_encoder(**batch['prompt']).last_hidden_state
                 prompt_embeds = prompt_encoder(
@@ -339,7 +347,8 @@ if __name__ == '__main__':
                     use_rec_prefix=True
                 )
                 batch['context']['prompt_embeds'] = prompt_embeds
-                batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+                # batch['context']['entity_embeds'] = prompt_encoder.get_entity_embeds()
+                batch['context']['entity_embeds'] = accelerator.unwrap_model(prompt_encoder).get_entity_embeds()
 
                 outputs = model(**batch['context'], rec=True)
                 test_loss.append(float(outputs.rec_loss))
@@ -350,9 +359,10 @@ if __name__ == '__main__':
                 evaluator.evaluate(ranks, labels)
 
         # metric
-        report = accelerator.gather(evaluator.report())
+        report = evaluator.report()
         for k, v in report.items():
-            report[k] = v.sum().item()
+            report[k] = v.to(device)
+        report = accelerator.gather(report)
 
         test_report = {}
         for k, v in report.items():
@@ -366,5 +376,6 @@ if __name__ == '__main__':
         evaluator.reset_metric()
 
     final_dir = os.path.join(args.output_dir, 'final')
-    prompt_encoder.save(final_dir)
+    # prompt_encoder.save(final_dir)
+    accelerator.unwrap_model(prompt_encoder).save(final_dir)
     logger.info(f'save final model')

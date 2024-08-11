@@ -117,7 +117,7 @@ if __name__ == '__main__':
 
     kg = DBpedia(dataset=args.dataset, debug=args.debug).get_entity_kg_info()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, truncation=True, max_length=512)
     tokenizer.add_special_tokens(gpt2_special_tokens_dict)
     model = PromptGPT2forCRS.from_pretrained(args.model)
     model.resize_token_embeddings(len(tokenizer))
@@ -131,11 +131,12 @@ if __name__ == '__main__':
     text_encoder = text_encoder.to(device)
 
     prompt_encoder = KGPrompt(
-        model.config.n_embd, text_encoder.config.hidden_size, model.config.n_head, model.config.n_layer, 2,
+        hidden_size=model.config.n_embd, token_hidden_size=text_encoder.config.hidden_size,n_head=model.config.n_head, n_layer=model.config.n_layer, n_block=2,
         n_entity=kg['num_entities'], num_relations=kg['num_relations'], num_bases=args.num_bases,
         edge_index=kg['edge_index'], edge_type=kg['edge_type'],
         n_prefix_conv=args.n_prefix_conv
     )
+
     if args.prompt_encoder is not None:
         prompt_encoder.load(args.prompt_encoder)
     prompt_encoder = prompt_encoder.to(device)
@@ -248,7 +249,7 @@ if __name__ == '__main__':
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process, desc="Training")
 
     # save model with best metric
     metric, mode = 'loss', -1
@@ -262,6 +263,7 @@ if __name__ == '__main__':
 
     # train loop
     for epoch in range(args.num_train_epochs):
+        logger.info(f"Epoch {epoch+1} started")
         train_loss = []
         prompt_encoder.train()
         for step, batch in enumerate(train_dataloader):
@@ -302,9 +304,10 @@ if __name__ == '__main__':
         del train_loss, batch
 
         # dev
+        logger.info(f"Validation for epoch {epoch}")
         valid_loss = []
         prompt_encoder.eval()
-        for batch in tqdm(valid_dataloader, disable=not accelerator.is_local_main_process):
+        for batch in tqdm(valid_dataloader, disable=not accelerator.is_local_main_process, desc="Validating.."):
             with torch.no_grad():
                 token_embeds = text_encoder(**batch['prompt']).last_hidden_state
                 prompt_embeds = prompt_encoder(
@@ -357,13 +360,15 @@ if __name__ == '__main__':
 
         if valid_report[f'valid/{metric}'] * mode > best_metric * mode:
             best_metric = valid_report[f'valid/{metric}']
-            prompt_encoder.save(best_metric_dir)
+            # prompt_encoder.save(best_metric_dir)
+            accelerator.unwrap_model(prompt_encoder).save(best_metric_dir)
             logger.info(f'new best model with {metric}')
 
         # test
+        logger.info(f"Testing for epoch {epoch}")
         test_loss = []
         prompt_encoder.eval()
-        for batch in tqdm(test_dataloader, disable=not accelerator.is_local_main_process):
+        for batch in tqdm(test_dataloader, disable=not accelerator.is_local_main_process, desc="Testing.."):
             with torch.no_grad():
                 token_embeds = text_encoder(**batch['prompt']).last_hidden_state
                 prompt_embeds = prompt_encoder(
@@ -417,5 +422,6 @@ if __name__ == '__main__':
         evaluator.log_cnt += 1
 
     final_dir = os.path.join(args.output_dir, 'final')
-    prompt_encoder.save(final_dir)
+    # prompt_encoder.save(final_dir)
+    accelerator.unwrap_model(prompt_encoder).save(final_dir)
     logger.info(f'save final model')

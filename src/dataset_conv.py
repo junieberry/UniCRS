@@ -2,6 +2,7 @@ import json
 import os
 from collections import defaultdict
 
+import IPython
 import torch
 from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
@@ -41,9 +42,11 @@ class CRSConvDataset(Dataset):
         self.prompt_max_length -= 1
 
         dataset_dir = os.path.join('data', dataset)
-        data_file = os.path.join(dataset_dir, f'{split}_data_processed.jsonl')
+        data_file = os.path.join(dataset_dir, f'{split}_data_mask_processed.jsonl')
         self.data = []
         self.prepare_data(data_file)
+        import pickle
+        pickle.dump(self.data, open('data_after_dataset.pkl', 'wb'))
 
     def prepare_data(self, data_file):
         with open(data_file, 'r', encoding='utf-8') as f:
@@ -170,6 +173,7 @@ class CRSConvDataCollator:
                 entity_batch.append(data['entity'])
 
         input_batch = {}
+        
 
         context_batch = self.tokenizer.pad(
             context_batch, padding=self.padding, pad_to_multiple_of=self.pad_to_multiple_of,
@@ -177,8 +181,7 @@ class CRSConvDataCollator:
         )
         if not self.gen:
             resp_batch = context_batch['input_ids']
-            resp_batch = [[token_id if token_id != self.tokenizer.pad_token_id else -100 for token_id in resp] for resp
-                          in resp_batch]
+            resp_batch = [[token_id if token_id != self.tokenizer.pad_token_id else -100 for token_id in resp] for resp in resp_batch]
             input_batch['resp'] = torch.as_tensor(resp_batch, device=self.device)
         else:
             input_batch['resp'] = resp_batch
@@ -196,7 +199,15 @@ class CRSConvDataCollator:
             if not isinstance(v, torch.Tensor):
                 prompt_batch[k] = torch.as_tensor(v, device=self.device)
         input_batch['prompt'] = prompt_batch
-
+        # ERROR : 
+        # File "/home/tako/junyoung/UniCRS/src/dataset_conv.py", line 200, in __call__
+        #     entity_batch = padded_tensor(
+        # File "/home/tako/junyoung/UniCRS/src/utils.py", line 55, in padded_tensor
+        #     output[i, :length] = item
+        # RuntimeError: The expanded size of the tensor (0) must match the existing size (2) at non-singleton dimension 0.  Target sizes: [0].  Tensor sizes: [2]
+        
+        # Embeded
+        # from IPython import embed; embed()
         entity_batch = padded_tensor(
             entity_batch, pad_idx=self.pad_entity_id, pad_tail=True, device=self.device,
             use_amp=self.use_amp, debug=self.debug, max_len=self.entity_max_length
