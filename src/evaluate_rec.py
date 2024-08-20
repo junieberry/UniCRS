@@ -6,7 +6,7 @@ import torch
 class RecEvaluator:
     def __init__(self, k_list=None, device=torch.device('cpu')):
         if k_list is None:
-            k_list = [1, 10, 50]
+            k_list = [1, 5, 10, 20, 50]
         self.k_list = k_list
         self.device = device
 
